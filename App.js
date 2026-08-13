@@ -11,10 +11,13 @@ import {
   KeyboardAvoidingView,
   Platform,
   StatusBar,
+  BackHandler,
+  Modal,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const STORAGE_KEY = '@qarzdorlik_people_v1';
+const NOTE_PREVIEW_LEN = 36;
 
 // ---------- Yordamchi funksiyalar ----------
 
@@ -51,6 +54,11 @@ export default function App() {
   const [amountInput, setAmountInput] = useState('');
   const [noteInput, setNoteInput] = useState('');
 
+  // Tahrirlash oynasi holati: {personId, entryId, amount, note} | null
+  const [editingEntry, setEditingEntry] = useState(null);
+  // To'liq izohni ko'rish oynasi: matn string | null
+  const [viewingNote, setViewingNote] = useState(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -72,6 +80,27 @@ export default function App() {
       console.warn('Saqlashda xato', e);
     }
   }, []);
+
+  // Telefon "orqaga" tugmasi: avval oynalarni yopadi, keyin odam sahifasidan
+  // bosh sahifaga qaytadi, faqat bosh sahifada ilovadan chiqishga ruxsat beradi
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (viewingNote !== null) {
+        setViewingNote(null);
+        return true;
+      }
+      if (editingEntry !== null) {
+        setEditingEntry(null);
+        return true;
+      }
+      if (screen.name === 'person') {
+        setScreen({ name: 'home' });
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [screen, editingEntry, viewingNote]);
 
   if (!loaded) return null;
 
@@ -120,13 +149,60 @@ export default function App() {
     setNoteInput('');
   }
 
-  function deleteEntry(personId, entryId) {
+  function openEditEntry(personId, entry) {
+    setEditingEntry({
+      personId,
+      entryId: entry.id,
+      type: entry.type,
+      amount: String(entry.amount),
+      note: entry.note || '',
+    });
+  }
+
+  function saveEditEntry() {
+    if (!editingEntry) return;
+    const amount = parseFloat(
+      (editingEntry.amount || '').toString().replace(/\s/g, '').replace(',', '.')
+    );
+    if (!amount || amount <= 0) {
+      Alert.alert('Xato', 'Summani to\'g\'ri kiriting');
+      return;
+    }
     const next = people.map((p) =>
-      p.id === personId
-        ? { ...p, entries: p.entries.filter((e) => e.id !== entryId) }
+      p.id === editingEntry.personId
+        ? {
+            ...p,
+            entries: p.entries.map((e) =>
+              e.id === editingEntry.entryId
+                ? { ...e, amount, note: (editingEntry.note || '').trim() }
+                : e
+            ),
+          }
         : p
     );
     persist(next);
+    setEditingEntry(null);
+  }
+
+  function deleteEditingEntry() {
+    if (!editingEntry) return;
+    const { personId, entryId } = editingEntry;
+    Alert.alert('Qaydni o\'chirish', 'Bu qaydni o\'chirmoqchimisiz?', [
+      { text: 'Bekor qilish', style: 'cancel' },
+      {
+        text: 'O\'chirish',
+        style: 'destructive',
+        onPress: () => {
+          const next = people.map((p) =>
+            p.id === personId
+              ? { ...p, entries: p.entries.filter((e) => e.id !== entryId) }
+              : p
+          );
+          persist(next);
+          setEditingEntry(null);
+        },
+      },
+    ]);
   }
 
   // ---------- Ekranlar ----------
@@ -201,7 +277,7 @@ export default function App() {
             </View>
           </View>
 
-          <Text style={styles.sectionTitle}>Tarix</Text>
+          <Text style={styles.sectionTitle}>Tarix (bosib tahrirlang)</Text>
           <FlatList
             data={person.entries}
             keyExtractor={(e) => e.id}
@@ -209,42 +285,124 @@ export default function App() {
             ListEmptyComponent={
               <Text style={styles.emptyText}>Hali yozuv yo'q</Text>
             }
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.entryRow}
-                onLongPress={() =>
-                  Alert.alert('Yozuvni o\'chirish?', '', [
-                    { text: 'Bekor qilish', style: 'cancel' },
-                    {
-                      text: 'O\'chirish',
-                      style: 'destructive',
-                      onPress: () => deleteEntry(person.id, item.id),
-                    },
-                  ])
-                }
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.entryType}>
-                    {item.type === 'berdim' ? 'Berdim' : 'Qaytardi'}
-                    {item.note ? ` \u2014 ${item.note}` : ''}
-                  </Text>
-                  <Text style={styles.entryDate}>
-                    {new Date(item.date).toLocaleDateString('uz-UZ')}
-                  </Text>
-                </View>
-                <Text
-                  style={[
-                    styles.entryAmount,
-                    { color: item.type === 'berdim' ? '#1a7f37' : '#c62828' },
-                  ]}
+            renderItem={({ item }) => {
+              const noteTooLong = item.note && item.note.length > NOTE_PREVIEW_LEN;
+              const notePreview = noteTooLong
+                ? item.note.slice(0, NOTE_PREVIEW_LEN) + '\u2026'
+                : item.note;
+              return (
+                <TouchableOpacity
+                  style={styles.entryRow}
+                  onPress={() => openEditEntry(person.id, item)}
                 >
-                  {item.type === 'berdim' ? '+' : '-'}
-                  {formatSum(item.amount)}
-                </Text>
-              </TouchableOpacity>
-            )}
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <Text style={styles.entryType}>
+                      {item.type === 'berdim' ? 'Berdim' : 'Qaytardi'}
+                    </Text>
+                    {!!item.note && (
+                      <Text style={styles.entryNote}>{notePreview}</Text>
+                    )}
+                    {noteTooLong && (
+                      <TouchableOpacity
+                        onPress={() => setViewingNote(item.note)}
+                        hitSlop={{ top: 6, bottom: 6, left: 0, right: 20 }}
+                      >
+                        <Text style={styles.moreLink}>Batafsil</Text>
+                      </TouchableOpacity>
+                    )}
+                    <Text style={styles.entryDate}>
+                      {new Date(item.date).toLocaleDateString('uz-UZ')}
+                    </Text>
+                  </View>
+                  <Text
+                    style={[
+                      styles.entryAmount,
+                      { color: item.type === 'berdim' ? '#1a7f37' : '#c62828' },
+                    ]}
+                  >
+                    {item.type === 'berdim' ? '+' : '-'}
+                    {formatSum(item.amount)}
+                  </Text>
+                </TouchableOpacity>
+              );
+            }}
           />
         </KeyboardAvoidingView>
+
+        {/* Qaydni tahrirlash oynasi */}
+        <Modal
+          visible={editingEntry !== null}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setEditingEntry(null)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalBox}>
+              <Text style={styles.modalTitle}>Qaydni tahrirlash</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Summa"
+                keyboardType="numeric"
+                value={editingEntry ? editingEntry.amount : ''}
+                onChangeText={(v) =>
+                  setEditingEntry((prev) => (prev ? { ...prev, amount: v } : prev))
+                }
+                placeholderTextColor="#999"
+              />
+              <TextInput
+                style={[styles.input, { minHeight: 70, textAlignVertical: 'top' }]}
+                placeholder="Izoh"
+                multiline
+                value={editingEntry ? editingEntry.note : ''}
+                onChangeText={(v) =>
+                  setEditingEntry((prev) => (prev ? { ...prev, note: v } : prev))
+                }
+                placeholderTextColor="#999"
+              />
+              <View style={styles.modalBtnRow}>
+                <TouchableOpacity
+                  style={[styles.modalBtn, styles.cancelBtn]}
+                  onPress={() => setEditingEntry(null)}
+                >
+                  <Text style={styles.modalBtnTextDark}>Bekor</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalBtn, styles.deleteEntryBtn]}
+                  onPress={deleteEditingEntry}
+                >
+                  <Text style={styles.modalBtnText}>O'chirish</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalBtn, styles.saveBtn]}
+                  onPress={saveEditEntry}
+                >
+                  <Text style={styles.modalBtnText}>Saqlash</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* To'liq izohni ko'rish oynasi */}
+        <Modal
+          visible={viewingNote !== null}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setViewingNote(null)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalBox}>
+              <Text style={styles.modalTitle}>Izoh</Text>
+              <Text style={styles.fullNoteText}>{viewingNote}</Text>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.saveBtn, { marginTop: 14 }]}
+                onPress={() => setViewingNote(null)}
+              >
+                <Text style={styles.modalBtnText}>Yopish</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     );
   }
@@ -403,7 +561,7 @@ const styles = StyleSheet.create({
   giveBtn: { backgroundColor: '#1a7f37' },
   getBtn: { backgroundColor: '#c62828' },
   actionBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#555', marginBottom: 8 },
+  sectionTitle: { fontSize: 13, fontWeight: '700', color: '#888', marginBottom: 8 },
   entryRow: {
     backgroundColor: '#fff',
     borderRadius: 10,
@@ -413,9 +571,39 @@ const styles = StyleSheet.create({
     borderColor: '#eee',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
   },
   entryType: { fontSize: 14, fontWeight: '600', color: '#1a1a1a' },
-  entryDate: { fontSize: 12, color: '#999', marginTop: 2 },
+  entryNote: { fontSize: 12, color: '#777', marginTop: 2 },
+  moreLink: { fontSize: 12, color: '#2f6fed', fontWeight: '600', marginTop: 2 },
+  entryDate: { fontSize: 11, color: '#aaa', marginTop: 4 },
   entryAmount: { fontSize: 15, fontWeight: '700' },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalBox: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 18,
+    width: '100%',
+    maxWidth: 380,
+  },
+  modalTitle: { fontSize: 16, fontWeight: '700', color: '#1a1a1a', marginBottom: 10 },
+  modalBtnRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  modalBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 9,
+    alignItems: 'center',
+  },
+  cancelBtn: { backgroundColor: '#eee' },
+  saveBtn: { backgroundColor: '#2f6fed' },
+  deleteEntryBtn: { backgroundColor: '#c62828' },
+  modalBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  modalBtnTextDark: { color: '#333', fontWeight: '700', fontSize: 13 },
+  fullNoteText: { fontSize: 14, color: '#333', lineHeight: 20 },
 });
